@@ -121,14 +121,6 @@ The Android PhoneAgent uses:
 - ✅ Open apps by package name
 - ✅ Wait/delay actions
 
-### Planned Features
-- 📱 Screenshot capture and analysis
-- 🔄 Background automation
-- 📍 Location-based triggers
-- 🔔 Notification interaction
-- 📞 Call and SMS automation
-- 🎵 Media control
-
 ## Limitations
 
 - Requires accessibility service permission (security consideration)
@@ -191,11 +183,6 @@ The Android PhoneAgent uses:
 - Check internet connection
 - Ensure target app supports accessibility
 - Try simpler commands first
-
-**App crashes**:
-- Check device compatibility (API 24+)
-- Review logs: `adb logcat | grep PhoneAgent`
-- Ensure all permissions are granted
 
 ## Contributing
 
