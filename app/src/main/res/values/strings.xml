@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PhoneAgent</string>
+    <string name="accessibility_service_label">PhoneAgent Accessibility Service</string>
+    <string name="accessibility_service_description">Allows PhoneAgent to control other apps and interact with the UI</string>
+</resources> 
