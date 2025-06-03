@@ -1,6 +1,6 @@
 # PhoneAgent for Android
 
-This is an Android port of the [iOS PhoneAgent](https://github.com/mehagarg/PhoneAgent) that uses OpenAI models to control an Android phone through AI commands. It can interact with apps, tap buttons, fill forms, swipe, scroll, and perform complex multi-app workflows.
+This is an Android port of the [iOS PhoneAgent](https://github.com/rounak/PhoneAgent) that uses OpenAI models to control an Android phone through AI commands. It can interact with apps, tap buttons, fill forms, swipe, scroll, and perform complex multi-app workflows.
 
 ## Features
 
@@ -218,6 +218,6 @@ MIT License - see LICENSE file for details
 
 ## Acknowledgments
 
-- Original iOS PhoneAgent by [@mehagarg](https://github.com/mehagarg/PhoneAgent)
+- Original iOS PhoneAgent by [https://github.com/rounak](https://github.com/rounak/PhoneAgent)
 - OpenAI for the GPT API
 - Android Accessibility Service framework 
