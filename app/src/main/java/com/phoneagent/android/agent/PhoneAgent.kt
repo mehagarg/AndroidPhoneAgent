@@ -35,28 +35,9 @@ class PhoneAgent @Inject constructor(
     companion object {
         private const val TAG = "PhoneAgent"
         private const val SYSTEM_PROMPT = """
-You are an AI assistant that can control an Android phone. You have access to the current UI state and can perform actions like tapping, typing, swiping, and opening apps.
-
-Current capabilities:
-- get_current_ui: Get the current app's UI elements and their properties
-- tap_coordinates: Tap at specific x,y coordinates
-- click_element: Click on a UI element by its properties
-- type_text: Type text into a text field
-- swipe: Perform swipe gestures
-- scroll: Scroll in a direction
-- open_app: Open an app by package name
-- wait: Wait for a specified time
-
-When analyzing the UI, look for:
-- Buttons with text or descriptions
-- Text fields for input
-- Scrollable areas
-- Navigation elements
-- App-specific elements
-
-Always start by getting the current UI state, then plan your actions step by step. Be patient with loading times and wait between actions when necessary.
-
-Respond with natural language explanations of what you're doing and any issues you encounter.
+You are an Android phone assistant that helps the user accomplish their tasks.
+You have multiple tools available, and it might take multiple steps to complete a task.
+Never ask the user what they want to do, just perform the action.
 """
     }
     
@@ -66,7 +47,7 @@ Respond with natural language explanations of what you're doing and any issues y
     fun setApiKey(key: String) {
         apiKey = key
         conversationHistory.clear()
-        conversationHistory.add(ChatMessage("system", SYSTEM_PROMPT))
+        // Don't add system prompt here - we'll add it dynamically with UI context
     }
     
     suspend fun executeCommand(command: AgentCommand): AgentResponse {
@@ -78,128 +59,191 @@ Respond with natural language explanations of what you're doing and any issues y
             ?: return AgentResponse("Accessibility service not enabled. Please enable it in Settings.", false)
         
         val startTime = System.currentTimeMillis()
+        val allActions = mutableListOf<AutomationAction>()
+        var overallSuccess = true
+        var finalResponse = ""
         
         try {
-            // Add user message to conversation
-            conversationHistory.add(ChatMessage("user", command.text))
-            
             // Get initial UI state
-            val currentUI = accessibilityService.getCurrentUIHierarchy()
-            val uiDescription = "Current UI state:\n${currentUI.toSimplifiedString()}"
+            var currentUI = accessibilityService.getCurrentUIHierarchy()
+            
+            // Build dynamic system prompt with UI context
+            var dynamicSystemPrompt = SYSTEM_PROMPT
+            if (currentUI.elements.isNotEmpty()) {
+                dynamicSystemPrompt += """
+
+Here is the accessibility tree of the currently open app: ${currentUI.toSimplifiedString()}
+Depending on the user's request, you can perform actions in the current app, or open a different app.
+"""
+            }
+            
+            // Clear conversation history and set up fresh context for each command
+            conversationHistory.clear()
+            conversationHistory.add(ChatMessage("system", dynamicSystemPrompt))
+            conversationHistory.add(ChatMessage("user", command.text))
             
             // Create function definitions for OpenAI
             val functions = createFunctionDefinitions()
             
-            // Make OpenAI API call
-            val response = openAIService.chatCompletion(
-                authorization = "Bearer $apiKey",
-                request = ChatCompletionRequest(
-                    model = "gpt-4",
-                    messages = conversationHistory + ChatMessage("user", uiDescription),
-                    functions = functions
+            // Multi-step execution loop (max 10 steps to prevent infinite loops)
+            var stepCount = 0
+            val maxSteps = 10
+            var shouldContinue = true
+            
+            while (stepCount < maxSteps && shouldContinue) {
+                stepCount++
+                Log.d(TAG, "Executing step $stepCount")
+                
+                // Make OpenAI API call
+                val response = openAIService.chatCompletion(
+                    authorization = "Bearer $apiKey",
+                    request = ChatCompletionRequest(
+                        model = "gpt-4",
+                        messages = conversationHistory,
+                        functions = functions
+                    )
                 )
-            )
-            
-            if (!response.isSuccessful) {
-                val errorMessage = "OpenAI API error: ${response.code()} ${response.message()}"
-                Log.e(TAG, errorMessage)
-                return AgentResponse(errorMessage, false)
-            }
-            
-            val chatResponse = response.body()
-            val choice = chatResponse?.choices?.firstOrNull()
-            val responseMessage = choice?.message
-            
-            if (responseMessage == null) {
-                return AgentResponse("No response from OpenAI", false)
-            }
-            
-            // Add assistant response to conversation
-            conversationHistory.add(ChatMessage(
-                role = responseMessage.role,
-                content = responseMessage.content ?: ""
-            ))
-            
-            val actions = mutableListOf<AutomationAction>()
-            var executionResult = "Task completed"
-            var success = true
-            
-            // Handle function calls
-            responseMessage.functionCall?.let { functionCall ->
-                try {
-                    val arguments = JsonParser.parseString(functionCall.arguments).asJsonObject
-                    val action = when (functionCall.name) {
-                        "get_current_ui" -> AutomationAction.GetCurrentUI
-                        "tap_coordinates" -> {
-                            val x = arguments.get("x").asFloat
-                            val y = arguments.get("y").asFloat
-                            AutomationAction.Tap(x, y)
+                
+                if (!response.isSuccessful) {
+                    val errorMessage = "OpenAI API error: ${response.code()} ${response.message()}"
+                    Log.e(TAG, errorMessage)
+                    return AgentResponse(errorMessage, false, allActions, System.currentTimeMillis() - startTime)
+                }
+                
+                val chatResponse = response.body()
+                val choice = chatResponse?.choices?.firstOrNull()
+                val responseMessage = choice?.message
+                
+                if (responseMessage == null) {
+                    return AgentResponse("No response from OpenAI", false, allActions, System.currentTimeMillis() - startTime)
+                }
+                
+                // Add assistant response to conversation
+                conversationHistory.add(ChatMessage(
+                    role = responseMessage.role,
+                    content = responseMessage.content ?: ""
+                ))
+                
+                finalResponse = responseMessage.content ?: "Task completed"
+                
+                // Check if there's a function call to execute
+                val functionCall = responseMessage.functionCall
+                if (functionCall != null) {
+                    try {
+                        val arguments = JsonParser.parseString(functionCall.arguments).asJsonObject
+                        val action = when (functionCall.name) {
+                            "get_current_ui" -> AutomationAction.GetCurrentUI
+                            "tap_coordinates" -> {
+                                val x = arguments.get("x").asFloat
+                                val y = arguments.get("y").asFloat
+                                AutomationAction.Tap(x, y)
+                            }
+                            "click_element" -> {
+                                val elementText = arguments.get("text")?.asString ?: ""
+                                val elementId = arguments.get("id")?.asString ?: ""
+                                val elementDesc = arguments.get("description")?.asString ?: ""
+                                
+                                // Find matching element in current UI
+                                val element = findElementInUI(currentUI, elementText, elementId, elementDesc)
+                                if (element != null) {
+                                    AutomationAction.ClickElement(element)
+                                } else {
+                                    Log.w(TAG, "Element not found: text=$elementText, id=$elementId, desc=$elementDesc")
+                                    null
+                                }
+                            }
+                            "type_text" -> {
+                                val text = arguments.get("text").asString
+                                AutomationAction.TypeText(text)
+                            }
+                            "swipe" -> {
+                                val startX = arguments.get("start_x").asFloat
+                                val startY = arguments.get("start_y").asFloat
+                                val endX = arguments.get("end_x").asFloat
+                                val endY = arguments.get("end_y").asFloat
+                                AutomationAction.Swipe(startX, startY, endX, endY)
+                            }
+                            "scroll" -> {
+                                val direction = arguments.get("direction").asString
+                                AutomationAction.Scroll(direction)
+                            }
+                            "open_app" -> {
+                                val packageName = arguments.get("package_name").asString
+                                AutomationAction.OpenApp(packageName)
+                            }
+                            "wait" -> {
+                                val milliseconds = arguments.get("milliseconds").asLong
+                                AutomationAction.Wait(milliseconds)
+                            }
+                            else -> null
                         }
-                        "click_element" -> {
-                            val elementText = arguments.get("text")?.asString ?: ""
-                            val elementId = arguments.get("id")?.asString ?: ""
-                            val elementDesc = arguments.get("description")?.asString ?: ""
+                        
+                        action?.let { 
+                            allActions.add(it)
+                            val actionResult = executeAction(it, accessibilityService)
                             
-                            // Find matching element in current UI
-                            val element = findElementInUI(currentUI, elementText, elementId, elementDesc)
-                            if (element != null) {
-                                AutomationAction.ClickElement(element)
+                            if (!actionResult.success) {
+                                overallSuccess = false
+                                // Add failure result to conversation so AI knows what happened
+                                conversationHistory.add(ChatMessage("user", "Action failed: ${actionResult.message}"))
                             } else {
-                                Log.w(TAG, "Element not found: text=$elementText, id=$elementId, desc=$elementDesc")
-                                null
+                                // Add success result to conversation
+                                conversationHistory.add(ChatMessage("user", "Action completed: ${actionResult.message}"))
+                                
+                                // Update UI state after actions that might change the screen
+                                when (it) {
+                                    is AutomationAction.Tap, is AutomationAction.ClickElement, 
+                                    is AutomationAction.Swipe, is AutomationAction.OpenApp -> {
+                                        delay(1000) // Give UI time to update
+                                        currentUI = accessibilityService.getCurrentUIHierarchy()
+                                        
+                                        // Add updated UI state to conversation
+                                        if (currentUI.elements.isNotEmpty()) {
+                                            conversationHistory.add(ChatMessage("user", 
+                                                "Updated UI state: ${currentUI.toSimplifiedString()}"))
+                                        } else {
+                                            // UI has no elements, add note about empty state
+                                            conversationHistory.add(ChatMessage("user", "UI state is empty"))
+                                        }
+                                    }
+                                    else -> {
+                                        // No UI update needed for other actions
+                                    }
+                                }
                             }
                         }
-                        "type_text" -> {
-                            val text = arguments.get("text").asString
-                            AutomationAction.TypeText(text)
-                        }
-                        "swipe" -> {
-                            val startX = arguments.get("start_x").asFloat
-                            val startY = arguments.get("start_y").asFloat
-                            val endX = arguments.get("end_x").asFloat
-                            val endY = arguments.get("end_y").asFloat
-                            AutomationAction.Swipe(startX, startY, endX, endY)
-                        }
-                        "scroll" -> {
-                            val direction = arguments.get("direction").asString
-                            AutomationAction.Scroll(direction)
-                        }
-                        "open_app" -> {
-                            val packageName = arguments.get("package_name").asString
-                            AutomationAction.OpenApp(packageName)
-                        }
-                        "wait" -> {
-                            val milliseconds = arguments.get("milliseconds").asLong
-                            AutomationAction.Wait(milliseconds)
-                        }
-                        else -> null
+                        
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error executing function call", e)
+                        overallSuccess = false
+                        conversationHistory.add(ChatMessage("user", "Error executing action: ${e.message}"))
                     }
-                    
-                    action?.let { 
-                        actions.add(it)
-                        val actionResult = executeAction(it, accessibilityService)
-                        if (!actionResult.success) {
-                            success = false
-                            executionResult = actionResult.message
-                        }
-                    }
-                    
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error executing function call", e)
-                    success = false
-                    executionResult = "Error executing action: ${e.message}"
+                } else {
+                    // No function call - AI thinks task is complete
+                    Log.d(TAG, "No function call - task appears complete")
+                    shouldContinue = false
+                }
+                
+                // Check if AI indicated task completion in response
+                if (responseMessage.content?.contains("task", ignoreCase = true) == true && 
+                    responseMessage.content?.contains("complete", ignoreCase = true) == true) {
+                    Log.d(TAG, "AI indicated task completion")
+                    shouldContinue = false
                 }
             }
             
-            val executionTime = System.currentTimeMillis() - startTime
-            val responseText = responseMessage.content ?: executionResult
+            if (stepCount >= maxSteps) {
+                Log.w(TAG, "Maximum steps reached - stopping execution")
+                finalResponse += "\n(Maximum steps limit reached)"
+            }
             
-            return AgentResponse(responseText, success, actions, executionTime)
+            val executionTime = System.currentTimeMillis() - startTime
+            return AgentResponse(finalResponse, overallSuccess, allActions, executionTime)
             
         } catch (e: Exception) {
             Log.e(TAG, "Error executing command", e)
             val executionTime = System.currentTimeMillis() - startTime
-            return AgentResponse("Error: ${e.message}", false, emptyList(), executionTime)
+            return AgentResponse("Error: ${e.message}", false, allActions, executionTime)
         }
     }
     
@@ -277,29 +321,29 @@ Respond with natural language explanations of what you're doing and any issues y
             ),
             Function(
                 name = "tap_coordinates",
-                description = "Tap at specific x,y coordinates on screen",
+                description = "Tap at specific coordinates",
                 parameters = FunctionParameters(
                     properties = mapOf(
-                        "x" to PropertyDefinition("number", "X coordinate to tap"),
-                        "y" to PropertyDefinition("number", "Y coordinate to tap")
+                        "x" to PropertyDefinition("number", "X coordinate"),
+                        "y" to PropertyDefinition("number", "Y coordinate")
                     ),
                     required = listOf("x", "y")
                 )
             ),
             Function(
                 name = "click_element",
-                description = "Click on a UI element by its text, ID, or description",
+                description = "Click on a UI element",
                 parameters = FunctionParameters(
                     properties = mapOf(
-                        "text" to PropertyDefinition("string", "Text content of the element"),
-                        "id" to PropertyDefinition("string", "ID of the element"),
-                        "description" to PropertyDefinition("string", "Content description of the element")
+                        "text" to PropertyDefinition("string", "Text content"),
+                        "id" to PropertyDefinition("string", "Element ID"),
+                        "description" to PropertyDefinition("string", "Content description")
                     )
                 )
             ),
             Function(
                 name = "type_text",
-                description = "Type text into a text field",
+                description = "Type text into a field",
                 parameters = FunctionParameters(
                     properties = mapOf(
                         "text" to PropertyDefinition("string", "Text to type")
@@ -309,43 +353,43 @@ Respond with natural language explanations of what you're doing and any issues y
             ),
             Function(
                 name = "swipe",
-                description = "Perform a swipe gesture from start coordinates to end coordinates",
+                description = "Perform swipe gesture",
                 parameters = FunctionParameters(
                     properties = mapOf(
-                        "start_x" to PropertyDefinition("number", "Starting X coordinate"),
-                        "start_y" to PropertyDefinition("number", "Starting Y coordinate"),
-                        "end_x" to PropertyDefinition("number", "Ending X coordinate"),
-                        "end_y" to PropertyDefinition("number", "Ending Y coordinate")
+                        "start_x" to PropertyDefinition("number", "Start X"),
+                        "start_y" to PropertyDefinition("number", "Start Y"),
+                        "end_x" to PropertyDefinition("number", "End X"),
+                        "end_y" to PropertyDefinition("number", "End Y")
                     ),
                     required = listOf("start_x", "start_y", "end_x", "end_y")
                 )
             ),
             Function(
                 name = "scroll",
-                description = "Scroll in a specified direction",
+                description = "Scroll in direction",
                 parameters = FunctionParameters(
                     properties = mapOf(
-                        "direction" to PropertyDefinition("string", "Direction to scroll", listOf("up", "down", "left", "right"))
+                        "direction" to PropertyDefinition("string", "Scroll direction", listOf("up", "down", "left", "right"))
                     ),
                     required = listOf("direction")
                 )
             ),
             Function(
                 name = "open_app",
-                description = "Open an app by its package name",
+                description = "Open an app",
                 parameters = FunctionParameters(
                     properties = mapOf(
-                        "package_name" to PropertyDefinition("string", "Package name of the app to open")
+                        "package_name" to PropertyDefinition("string", "App package name")
                     ),
                     required = listOf("package_name")
                 )
             ),
             Function(
                 name = "wait",
-                description = "Wait for a specified amount of time",
+                description = "Wait for specified time",
                 parameters = FunctionParameters(
                     properties = mapOf(
-                        "milliseconds" to PropertyDefinition("number", "Time to wait in milliseconds")
+                        "milliseconds" to PropertyDefinition("number", "Wait time in milliseconds")
                     ),
                     required = listOf("milliseconds")
                 )
