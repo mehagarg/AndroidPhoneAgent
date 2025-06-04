@@ -1,6 +1,13 @@
 # Demo
 
+Prompt:
+Open Tinder and perform 3 swipes for me.
 
+https://github.com/user-attachments/assets/6f0f1ac1-36ab-4c5a-aee4-efdfbef7f8a6
+
+
+
+Other single tasks
 https://github.com/user-attachments/assets/39a507cc-439e-4b4d-b8cc-17e8b57d4365
 
 
